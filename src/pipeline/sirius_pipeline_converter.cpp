@@ -30,6 +30,7 @@
 #include "op/sirius_physical_operator.hpp"
 #include "op/sirius_physical_operator_type.hpp"
 #include "op/sirius_physical_partition.hpp"
+#include "op/sirius_physical_passthrough_sink.hpp"
 #include "pipeline/repository_wiring.hpp"
 
 #include <algorithm>
@@ -192,6 +193,13 @@ std::string_view sirius_pipeline_converter::resolve_port_id(
   const op::sirius_physical_operator& sink, const op::sirius_physical_operator& /*parent*/)
 {
   using T = op::SiriusPhysicalOperatorType;
+  // Each UNION arm feeds its own "union_{i}" port, labelled on the arm's sink by wrap_union.
+  // Distinct names are required, not cosmetic: `add_port` is last-writer-wins and the repository
+  // manager keys by (operator_id, port_id), so a shared name would orphan an arm's repository.
+  // The returned view is backed by the sink's own member, which outlives every consumer of it.
+  if (sink.type == T::PASSTHROUGH_SINK) {
+    return sink.Cast<op::sirius_physical_passthrough_sink>().union_port_label();
+  }
   // Build-side CONCATs feed the join's "build" port; everything else feeds "default".
   if (sink.type == T::CONCAT) {
     return sink.Cast<op::sirius_physical_concat>().is_build_concat() ? "build" : "default";
@@ -250,6 +258,13 @@ op::MemoryBarrierType sirius_pipeline_converter::resolve_barrier(
       sink.get_parent_op()->type == T::HASH_JOIN) {
     return op::MemoryBarrierType::PARTIAL;
   }
+  // A UNION arm streams: bag union keeps no cross-batch state and makes no ordering guarantee, so
+  // it never needs a complete side. Under the FULL fall-through below, `get_next_task_hint` would
+  // refuse a task until *every* arm's pipeline finished, holding all arms' output in repositories
+  // — maximum peak memory and no producer/consumer overlap for an operator that only forwards.
+  // The UNION operator overrides the hint and does not read `port::type`, so this is the wiring
+  // declaring the same contract the operator already implements rather than a behavior change.
+  if (sink.type == T::PASSTHROUGH_SINK) { return op::MemoryBarrierType::PARTIAL; }
   return op::MemoryBarrierType::FULL;
 }
 
