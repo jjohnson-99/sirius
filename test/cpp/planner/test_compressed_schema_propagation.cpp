@@ -410,6 +410,24 @@ TEST_CASE("compressed_schema_propagation - grouped aggregation keeps narrow grou
     REQUIRE(plan->get_physical_types() == std::vector<cudf::data_type>{k_int8, k_int64});
   }
 
+  SECTION("a zero-aggregate DISTINCT keeps every key narrow and restores nothing below")
+  {
+    // The shape `SELECT DISTINCT` lowers to. With no aggregates there is no value-sensitive
+    // input, so restore_native_columns is handed an empty set and short-circuits: the child keeps
+    // its narrow carriers all the way through the PARTITION/MERGE_GROUP_BY exchange, and the
+    // single widening happens at the plan root on the already-deduplicated output.
+    duckdb::unique_ptr<sirius_physical_operator> plan =
+      make_grouped_aggregate({0, 1}, {}, make_scan(2, {k_int8, k_int8}));
+
+    sirius::planner::propagate_compressed_schema(plan);
+
+    REQUIRE(plan->children[0]->type == SiriusPhysicalOperatorType::TABLE_SCAN);
+    REQUIRE(plan->children[0]->get_physical_types() ==
+            std::vector<cudf::data_type>{k_int8, k_int8});
+    // Every output column is a key, so the whole output schema mirrors the child's carriers.
+    REQUIRE(plan->get_physical_types() == std::vector<cudf::data_type>{k_int8, k_int8});
+  }
+
   SECTION("unused payload columns remain narrow")
   {
     duckdb::unique_ptr<sirius_physical_operator> plan =
