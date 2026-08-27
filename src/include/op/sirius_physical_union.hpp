@@ -31,9 +31,11 @@ namespace op {
 //!
 //! `wrap_union` wraps each arm `child -> PASSTHROUGH_SINK`, and each sink feeds a *distinct* input
 //! port, `port_label(i)` for `children[i]`. The distinct names are a correctness requirement:
-//! `add_port` is last-writer-wins and the repository manager keys by `(operator_id, port_id)`, so a
-//! shared name would orphan an arm's repository and let the pipeline finish while that arm still
-//! had rows.
+//! `add_port` is last-writer-wins on the name, the repository manager keys by
+//! `(operator_id, port_id)`, and the pipeline-finish gate reads `is_source_pipeline_finished()` /
+//! `all_ports_empty()` across the same `ports` map. A shared name would therefore orphan an arm's
+//! repository, and because the orphan is no longer in that map, let the pipeline finish while that
+//! arm still had rows.
 class sirius_physical_union : public sirius_physical_operator {
  public:
   static constexpr const SiriusPhysicalOperatorType TYPE = SiriusPhysicalOperatorType::UNION;

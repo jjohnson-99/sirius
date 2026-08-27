@@ -259,11 +259,13 @@ op::MemoryBarrierType sirius_pipeline_converter::resolve_barrier(
     return op::MemoryBarrierType::PARTIAL;
   }
   // A UNION arm streams: bag union keeps no cross-batch state and makes no ordering guarantee, so
-  // it never needs a complete side. Under the FULL fall-through below, `get_next_task_hint` would
-  // refuse a task until *every* arm's pipeline finished, holding all arms' output in repositories
-  // — maximum peak memory and no producer/consumer overlap for an operator that only forwards.
-  // The UNION operator overrides the hint and does not read `port::type`, so this is the wiring
-  // declaring the same contract the operator already implements rather than a behavior change.
+  // it never needs a complete side. Same answer as the join's inbound edges just above, so a fan-in
+  // consumer absorbed into its producers' branches is the established shape rather than a novelty.
+  // The UNION operator overrides its own hint and never reads `port::type`, but the value still
+  // matters: `query_index` cuts a branch only on a FULL edge, so PARTIAL lets each arm's branch
+  // walk absorb the UNION's pipeline rather than give it one of its own, which feeds scheduling
+  // priorities. It is also what would keep the base hint from buffering every arm to completion,
+  // the day someone simplifies UNION back onto it.
   if (sink.type == T::PASSTHROUGH_SINK) { return op::MemoryBarrierType::PARTIAL; }
   return op::MemoryBarrierType::FULL;
 }
