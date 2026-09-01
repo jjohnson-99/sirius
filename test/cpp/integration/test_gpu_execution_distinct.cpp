@@ -18,17 +18,15 @@
  * @file test_gpu_execution_distinct.cpp
  * @brief GPU-vs-CPU correctness for `SELECT DISTINCT`, plus the plan-time fallbacks.
  *
- * `DISTINCT` returns a set, so its result is identical on both engines whenever it is computed
- * correctly at all -- and every Sirius entry point silently falls back to DuckDB CPU when plan
- * generation throws. A test that only compared results would therefore pass whether or not the
- * lowering ever ran. Every case here goes through `sirius::test::GpuExecutionFixture`, whose
- * `compare_gpu_vs_cpu` first asserts one successful rebind, one GPU execution and zero fallbacks,
- * and only then compares against the CPU run.
+ * Every supported case goes through the shared file-backed `GpuExecutionFixture`, whose
+ * `compare_gpu_vs_cpu` asserts a real GPU execution with no fallback before comparing against the
+ * CPU run. That assertion is what makes these tests meaningful: `DISTINCT` returns a set, so the
+ * results match whenever the query is answered at all, and a query that silently fell back to CPU
+ * would still compare equal.
  *
- * The guarded shapes use `expect_plan_fallback_matches_cpu` instead, which asserts the
- * plan-time fallback counter. `GpuExecutionFixture::expect_gpu_fallback` is the wrong tool for
- * them: it watches `runtime_fallbacks`, which counts GPU executions that failed mid-flight, and
- * every DISTINCT guard throws during `create_plan` before any GPU work is scheduled.
+ * Every DISTINCT guard throws during `create_plan`, before any GPU work is scheduled, so the
+ * guarded shapes use `expect_plan_fallback_matches_cpu` and assert the plan-time fallback counter
+ * rather than the runtime one.
  */
 
 #include <catch.hpp>
@@ -40,8 +38,8 @@
 
 namespace {
 
-/// Small table covering the key surface: duplicate `(a, b)` pairs, NULLs in either key column, two
-/// rows sharing the composite key `(NULL, 1)`, a wholly-NULL column, and a fully-NULL row.
+/// Duplicate `(a, b)` pairs, NULLs in either key column, two rows sharing the composite key
+/// `(NULL, 1)`, a wholly-NULL column, and a fully-NULL row.
 class DistinctFixture : public sirius::test::GpuExecutionFixture {
  public:
   DistinctFixture()
@@ -68,24 +66,17 @@ class DistinctFixture : public sirius::test::GpuExecutionFixture {
     );
     run_ok("CREATE TABLE dist_r (a INTEGER, x INTEGER);");
     run_ok("INSERT INTO dist_r VALUES (1, 10), (2, 20), (2, 21), (3, 30), (NULL, 40);");
-    // `v` is a function of `k`, so every DISTINCT ON over `k` has one correct answer no matter
-    // which row of a group represents it. The guarded shapes below need that: they compare a
-    // fallback run against a second CPU run, and DISTINCT ON without ORDER BY is otherwise free
-    // to pick a different representative each time.
+    // `v` is a function of `k`, so a DISTINCT ON over `k` has one correct answer whichever row
+    // represents a group. The guarded shapes need that: they compare a fallback run against a
+    // second CPU run, and DISTINCT ON without ORDER BY may pick a different row each time.
     run_ok("CREATE TABLE dist_fd (k INTEGER, v INTEGER);");
     run_ok("INSERT INTO dist_fd VALUES (1, 10), (1, 10), (2, 20), (2, 20), (3, 30), (NULL, NULL);");
-    // An INTERVAL key never reaches the GPU (see the guarded case below). It lives in its own
-    // table so that `SELECT DISTINCT *` over dist_t still runs there.
-    run_ok("CREATE TABLE dist_iv (iv INTERVAL);");
-    run_ok(
-      "INSERT INTO dist_iv VALUES "
-      "(INTERVAL 1 DAY), (INTERVAL 1 DAY), (INTERVAL 2 MONTH), (NULL);");
     run_ok("CHECKPOINT;");
   }
 };
 
-/// Separate fixture for the two volume cases, so the cheap cases above do not pay to load a
-/// million rows once per Catch2 test case.
+/// Separate from DistinctFixture so the cheap cases above do not load a million rows once per
+/// Catch2 test case.
 class DistinctBulkFixture : public sirius::test::GpuExecutionFixture {
  public:
   DistinctBulkFixture()
@@ -95,16 +86,13 @@ class DistinctBulkFixture : public sirius::test::GpuExecutionFixture {
     run_ok(
       "CREATE TABLE dist_str AS "
       "SELECT 'a_long_string_value_' || (i % 20) AS s FROM range(100000) t(i);");
-    // A million rows collapsing to ten groups, so the local dedup below the shuffle has real work
-    // to do rather than passing its input straight through.
     run_ok("CREATE TABLE dist_dup AS SELECT (i % 10) AS k, i AS payload FROM range(1000000) t(i);");
     run_ok("CHECKPOINT;");
   }
 };
 
-/// Run @p query with gpu_execution on: it must succeed via a plan-time CPU fallback -- the
-/// fallback counter moves, the execution counter does not -- and return exactly the CPU results.
-/// Modelled on the same helper in test_gpu_execution_semantic_cast_fallback.cpp.
+/// Run @p query with gpu_execution on: it must succeed via a plan-time CPU fallback, moving the
+/// fallback counter but not the execution counter, and return exactly the CPU results.
 void expect_plan_fallback_matches_cpu(sirius::test::GpuExecutionFixture& fx,
                                       std::string const& query)
 {
@@ -148,8 +136,8 @@ TEST_CASE_METHOD(DistinctFixture,
                  "gpu_execution DISTINCT keeps a NULL key as its own value",
                  "[integration][gpu_execution][distinct][nulls]")
 {
-  // cudf::null_policy::INCLUDE keeps NULL-keyed rows in play instead of dropping them, so exactly
-  // one NULL row survives -- matching DuckDB.
+  // cudf::null_policy::INCLUDE keeps NULL-keyed rows in play, so one NULL row survives as DuckDB
+  // returns it.
   compare_gpu_vs_cpu("SELECT DISTINCT a FROM dist_t");
 }
 
@@ -166,8 +154,8 @@ TEST_CASE_METHOD(DistinctFixture,
                  "gpu_execution DISTINCT collapses equal composite NULL keys",
                  "[integration][gpu_execution][distinct][nulls]")
 {
-  // The other NULL knob: cudf's hash groupby compares keys with null_equality::EQUAL, so the two
-  // (NULL, 1) rows must land in the same group. INCLUDE alone would not do that.
+  // cudf's hash groupby compares keys with null_equality::EQUAL, so the two (NULL, 1) rows land in
+  // the same group. INCLUDE alone would not do that.
   compare_gpu_vs_cpu("SELECT DISTINCT a, b FROM dist_t WHERE a IS NULL");
 }
 
@@ -190,7 +178,7 @@ TEST_CASE_METHOD(DistinctFixture,
                  "gpu_execution DISTINCT over every column",
                  "[integration][gpu_execution][distinct]")
 {
-  // The plain-DISTINCT degenerate shape at full width: every output column is a group key.
+  // Every output column is a group key.
   compare_gpu_vs_cpu("SELECT DISTINCT * FROM dist_t");
 }
 
@@ -199,8 +187,8 @@ TEST_CASE_METHOD(DistinctFixture,
                  "[integration][gpu_execution][distinct]")
 {
   // LogicalDistinct::order_by is set only for DISTINCT ON, so a plain DISTINCT under an ORDER BY
-  // reaches the builder unguarded and its ORDER BY sorts the deduplicated result. Asserted in the
-  // direction that can actually regress: this must NOT fall back.
+  // reaches the builder unguarded and its ORDER BY sorts the deduplicated result. This must not
+  // fall back.
   compare_gpu_vs_cpu_ordered(
     "SELECT DISTINCT a, b FROM dist_t ORDER BY a NULLS LAST, b NULLS "
     "LAST");
@@ -217,8 +205,8 @@ TEST_CASE_METHOD(DistinctFixture,
                  "gpu_execution DISTINCT ON with a key that is not an output column",
                  "[integration][gpu_execution][distinct]")
 {
-  // `b` is appended to the projection under the distinct and pruned again above it, so this runs
-  // as a two-key dedup feeding a single-column projection.
+  // `b` is appended to the projection under the distinct and pruned again above it, so this is a
+  // two-key dedup feeding a single-column projection.
   compare_gpu_vs_cpu("SELECT DISTINCT ON (a, b) a FROM dist_t");
 }
 
@@ -226,8 +214,7 @@ TEST_CASE_METHOD(DistinctFixture,
                  "gpu_execution DISTINCT ON with keys in a different order to the outputs",
                  "[integration][gpu_execution][distinct]")
 {
-  // Group position 0 reads child column 1, so the builder emits its reorder projection. Without
-  // this case that tail is never executed.
+  // Group position 0 reads child column 1, so the builder emits its reorder projection.
   compare_gpu_vs_cpu("SELECT DISTINCT ON (b, a) a, b FROM dist_t");
 }
 
@@ -274,8 +261,8 @@ TEST_CASE_METHOD(DistinctBulkFixture,
                  "gpu_execution DISTINCT over a heavily duplicated key",
                  "[integration][gpu_execution][distinct]")
 {
-  // A million rows over ten groups: the local dedup should shrink each batch to at most ten rows
-  // before the hash shuffle, which is the whole reason DISTINCT reuses the aggregate pipeline.
+  // A million rows over ten groups, so the local dedup shrinks each batch to at most ten rows
+  // before the hash shuffle.
   compare_gpu_vs_cpu("SELECT DISTINCT k FROM dist_dup");
 }
 
@@ -287,8 +274,8 @@ TEST_CASE_METHOD(DistinctFixture,
                  "gpu_execution DISTINCT ON with ORDER BY falls back at plan time",
                  "[integration][gpu_execution][distinct]")
 {
-  // The highest-severity shape: it names a specific row per group, and a hash-partitioned dedup
-  // would return an arbitrary one -- a plausible wrong answer rather than an error.
+  // This names a specific row per group, and a hash-partitioned dedup would return an arbitrary
+  // one: a plausible wrong answer rather than an error.
   expect_plan_fallback_matches_cpu(
     *this, "SELECT DISTINCT ON (k) k, v FROM dist_fd ORDER BY v NULLS LAST");
 }
@@ -305,23 +292,23 @@ TEST_CASE_METHOD(DistinctFixture,
                  "gpu_execution DISTINCT with an ORDER BY outside the select list falls back",
                  "[integration][gpu_execution][distinct]")
 {
-  // The plain-DISTINCT shape with fewer targets than output columns. The binder synthesizes one
-  // distinct target per select-list entry and only then hoists `v` into the select list to order
-  // by it, so the node is two columns wide with a single target and `v` would need a grouped
-  // FIRST. Ordering by `v` is deterministic here only because `dist_fd.v` is a function of `k`.
+  // The binder synthesizes one distinct target per select-list entry and only then hoists `v` into
+  // the select list to order by it, so the node is two columns wide with a single target and `v`
+  // would need a grouped FIRST.
   expect_plan_fallback_matches_cpu(*this, "SELECT DISTINCT k FROM dist_fd ORDER BY v NULLS LAST");
 }
 
 TEST_CASE_METHOD(DistinctFixture,
-                 "gpu_execution DISTINCT over an INTERVAL key falls back at plan time",
+                 "gpu_execution DISTINCT over a collated VARCHAR key falls back at plan time",
                  "[integration][gpu_execution][distinct]")
 {
-  // Binder::BindModifiers pushes a collation over every distinct target, and the INTERVAL callback
-  // fires on the type alone rather than on a configured collation: the target arrives as
-  // normalized_interval(iv) instead of a column reference, so no output column is covered by a
-  // bare-reference target and the builder throws. TIME WITH TIME ZONE (timetz_byte_comparable) and
-  // VARIANT (variant_normalize) fall back the same way, on default settings.
-  expect_plan_fallback_matches_cpu(*this, "SELECT DISTINCT iv FROM dist_iv");
+  // Binder::BindModifiers pushes a collation over every distinct target, so under a non-binary
+  // default_collation the key arrives as a call rather than as a bare reference and the builder's
+  // uncovered-output guard refuses it. Every `s_short` value is already lower case, so each nocase
+  // group holds one original value and the two CPU runs cannot disagree about which row it is.
+  run_ok("SET default_collation = 'nocase';");
+  expect_plan_fallback_matches_cpu(*this, "SELECT DISTINCT s_short FROM dist_t");
+  run_ok("RESET default_collation;");
 }
 
 TEST_CASE_METHOD(DistinctFixture,

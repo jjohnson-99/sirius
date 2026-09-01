@@ -321,14 +321,6 @@ the finished sidecars at wrap time rather than through a propagation case:
 - Distinct- and sort-side exchanges are native because their inputs are restored at the
   boundary.
 
-`SELECT DISTINCT` lowers to that same grouped aggregate with an empty aggregate list
-(`src/planner/sirius_plan_distinct.cpp`), which makes it the best case the ladder models. With no
-value-sensitive aggregate input, `restore_native_columns` is handed an empty set and short-circuits,
-so nothing is restored below the aggregate; and every output column is a group key, so the whole
-payload is narrow bytes through the local dedup, the hash shuffle and the merge, widened exactly
-once at the plan root -- on the already-deduplicated output. (The "distinct-side exchange" above is
-the DELIM_JOIN's internal duplicate elimination, which is a different construct and stays native.)
-
 | Operator | Inserted by | Carrier disposition |
 |---|---|---|
 | PARTITION / CONCAT (hash-join feeder) | `wrap_join_child` | Keys native, payloads narrow (sidecar copied from the join child) |

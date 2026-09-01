@@ -437,10 +437,9 @@ TEST_CASE("tier_narrowing_policy - grouped-aggregate keys keep narrow only when 
 
   SECTION("a zero-aggregate DISTINCT gives every key transport")
   {
-    // The mirror of the propagation ladder's DISTINCT section. Group keys earn `transport`, and
-    // the keep rule short-circuits on it, so the plan root's boundary_restore mark cannot retract
-    // them: `SELECT DISTINCT` is the best case the tier policy models, because its keys are the
-    // whole payload.
+    // The mirror of the propagation ladder's DISTINCT section. Group keys earn `transport` and the
+    // keep rule short-circuits on it, so the plan root's boundary_restore mark cannot retract them,
+    // and under DISTINCT the keys are the whole payload.
     auto plan = make_grouped_aggregate({0, 1}, {}, make_integer_scan(2, {k_int8, k_int8}));
 
     auto const retracted = sirius::planner::apply_tier_narrowing_policy(*plan);

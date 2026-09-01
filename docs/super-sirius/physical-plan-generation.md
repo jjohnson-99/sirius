@@ -21,7 +21,7 @@ The `sirius_physical_plan_generator::create_plan()` method is the entry point. I
 | `LOGICAL_PROJECTION` | `PROJECTION` | `src/planner/sirius_plan_projection.cpp` |
 | `LOGICAL_FILTER` | `FILTER` | `src/planner/sirius_plan_filter.cpp` |
 | `LOGICAL_AGGREGATE_AND_GROUP_BY` | `HASH_GROUP_BY` / `UNGROUPED_AGGREGATE` | `src/planner/sirius_plan_aggregate.cpp` |
-| `LOGICAL_DISTINCT` | `HASH_GROUP_BY` (zero aggregates) | `src/planner/sirius_plan_distinct.cpp` (see *Distinct Planning* below — several `DISTINCT` and `DISTINCT ON` shapes fall back to CPU) |
+| `LOGICAL_DISTINCT` | `HASH_GROUP_BY` (zero aggregates) | `src/planner/sirius_plan_distinct.cpp` (some shapes fall back to CPU) |
 | `LOGICAL_COMPARISON_JOIN` | `HASH_JOIN` / `NESTED_LOOP_JOIN` | `src/planner/sirius_plan_comparison_join.cpp` |
 | `LOGICAL_DELIM_JOIN` | `LEFT_DELIM_JOIN` / `RIGHT_DELIM_JOIN` | `src/planner/sirius_plan_comparison_join.cpp` |
 | `LOGICAL_ORDER_BY` | `ORDER_BY` | `src/planner/sirius_plan_order.cpp` |
@@ -68,20 +68,11 @@ Before either is chosen, `materialize_expression_join_keys()` pushes a projectio
 
 **File:** `src/planner/sirius_plan_distinct.cpp`
 
-`LOGICAL_DISTINCT` becomes a single `sirius_physical_grouped_aggregate` with an empty aggregate list — the distinct targets are the group keys, so deduplication is grouping with nothing to compute per group — and `insert_gpu_pipeline_operators` wraps it exactly as it wraps a GROUP BY. A projection is pushed above the aggregate only when a key sits at an output position other than its own (`SELECT DISTINCT ON (b, a) a, b`).
+`LOGICAL_DISTINCT` becomes a single `sirius_physical_grouped_aggregate` with an empty aggregate list. The distinct targets are the group keys, so deduplication is grouping with nothing to compute per group, and `insert_gpu_pipeline_operators` wraps the result exactly as it wraps a GROUP BY.
 
-Plain `SELECT DISTINCT a, b` runs on the GPU: the binder synthesizes one distinct target per select-list entry, so every output column is a key at its own position. The shapes below are refused during `create_plan`, so each is a plan-time CPU fallback rather than a failed query.
-
-| shape that falls back | why |
-|---|---|
-| `SELECT DISTINCT ON (k) k, other` — any output column that is not itself a distinct target | carrying that column out of each group needs a grouped `FIRST` aggregate, which Sirius cannot lower yet |
-| `SELECT DISTINCT a FROM t ORDER BY b`, where `b` is not in the select list | the binder appends `b` to the select list *after* synthesizing the distinct targets from it, so the node ends up wider than its target list and `b` needs the same grouped `FIRST` |
-| `SELECT DISTINCT ON (k) ... ORDER BY t` | this names the first row of each group under a global order, which the hash shuffle destroys; running it as an unordered dedup would return an arbitrary row, so it is refused rather than answered wrongly |
-| a distinct key of type `INTERVAL`, `TIME WITH TIME ZONE` or `VARIANT` — plain `DISTINCT` included — or any VARCHAR key under a non-binary `default_collation` | `Binder::BindModifiers` pushes a collation over every distinct target, so the key arrives wrapped in `normalized_interval` / `timetz_byte_comparable` / `variant_normalize` / a collation call rather than as a plain column reference, and those wrappers are not lowered. The first three types have no Sirius carrier either, so a scan that returns one is rejected before the distinct is reached |
-| a nested (STRUCT/LIST/MAP) distinct key | `reject_nested_column_operation()`, as for a GROUP BY key — see *Unsupported expressions* above |
-| the planned child's output schema does not match the schema `LOGICAL_DISTINCT` declares — e.g. `SELECT DISTINCT sum(x) FROM t GROUP BY k`, where the aggregate below has rewritten its own HUGEINT output to BIGINT | the builder reads the logical node's types where DuckDB's reference reads the physical child's; it refuses rather than emit an operator whose declared types contradict the data it reads |
-
-**The ordered guard tests `LogicalDistinct::order_by`, not `distinct_type`.** DuckDB's binder populates `order_by` only for `DISTINCT ON`, so `SELECT DISTINCT a, b FROM t ORDER BY a` reaches the builder with `order_by == nullptr` and runs on the GPU: its `ORDER BY` becomes a separate `LOGICAL_ORDER` above the node, sorting the deduplicated result instead of choosing which row represents each group. Read the `DISTINCT ON ... ORDER BY` row above as *`DISTINCT ON` carrying an `ORDER BY`*, never as *`DISTINCT` carrying an `ORDER BY`* — turning that guard into a `distinct_type` check would send every supported ordered `DISTINCT` to the CPU.
+- **Reorder projection** — pushed above the aggregate only when a key sits at an output position other than its own (`SELECT DISTINCT ON (b, a) a, b`). Plain `SELECT DISTINCT a, b` never needs one: the binder synthesizes one target per select-list entry, so every output column is already a key at its own position
+- **Unsupported shapes** — refused during `create_plan`, so each is a plan-time CPU fallback: an output column that no distinct target covers (it would need a grouped `FIRST`, which Sirius cannot lower yet), `DISTINCT ON` under an `ORDER BY`, a VARCHAR key under a non-binary `default_collation`, a nested key (`reject_nested_column_operation()`), and a child whose output schema disagrees with the types the node declares
+- **The ordered guard tests `LogicalDistinct::order_by`, not `distinct_type`** — the binder sets `order_by` only for `DISTINCT ON`, so a plain `SELECT DISTINCT a, b FROM t ORDER BY a` runs on the GPU with its `ORDER BY` as a separate `LOGICAL_ORDER` above the node. Turning that guard into a `distinct_type` check would send every ordered `DISTINCT` to the CPU
 
 ### Filter Pushdown
 
