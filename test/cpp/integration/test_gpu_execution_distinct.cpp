@@ -38,6 +38,36 @@
 
 namespace {
 
+/// Sets a session/global setting for the enclosing scope and resets it on the way out, including
+/// when a REQUIRE fails and unwinds. Every `[integration]` fixture borrows its connection from the
+/// shared `g_integration_env`, which outlives the case, and `default_collation` is
+/// GLOBAL_DEFAULT-scoped -- so a setting left behind by a failed assertion would reach every later
+/// integration case in the binary.
+class scoped_setting {
+ public:
+  /// @p literal is spliced into the SET statement verbatim, so string values carry their quotes.
+  scoped_setting(sirius::test::GpuExecutionFixture& fixture,
+                 std::string name,
+                 std::string const& literal)
+    : fixture_(fixture), name_(std::move(name))
+  {
+    fixture_.run_ok("SET " + name_ + " = " + literal + ";");
+  }
+
+  /// Resets through the raw connection rather than run_ok(): a Catch2 assertion during unwinding
+  /// terminates, and a poisoned connection here is already being reported by the failure above.
+  ~scoped_setting() { fixture_.con->Query("RESET " + name_ + ";"); }
+
+  scoped_setting(scoped_setting const&)            = delete;
+  scoped_setting& operator=(scoped_setting const&) = delete;
+  scoped_setting(scoped_setting&&)                 = delete;
+  scoped_setting& operator=(scoped_setting&&)      = delete;
+
+ private:
+  sirius::test::GpuExecutionFixture& fixture_;
+  std::string name_;
+};
+
 /// Duplicate `(a, b)` pairs, NULLs in either key column, two rows sharing the composite key
 /// `(NULL, 1)`, a wholly-NULL column, and a fully-NULL row.
 class DistinctFixture : public sirius::test::GpuExecutionFixture {
@@ -306,9 +336,8 @@ TEST_CASE_METHOD(DistinctFixture,
   // default_collation the key arrives as a call rather than as a bare reference and the builder's
   // uncovered-output guard refuses it. Every `s_short` value is already lower case, so each nocase
   // group holds one original value and the two CPU runs cannot disagree about which row it is.
-  run_ok("SET default_collation = 'nocase';");
+  scoped_setting collation(*this, "default_collation", "'nocase'");
   expect_plan_fallback_matches_cpu(*this, "SELECT DISTINCT s_short FROM dist_t");
-  run_ok("RESET default_collation;");
 }
 
 TEST_CASE_METHOD(DistinctFixture,

@@ -669,6 +669,24 @@ TEST_CASE_METHOD(plan_tree_shape_fixture,
                      "output column 1 has no distinct target");
   }
 
+  SECTION("a collated distinct target is not a plain reference to any output column")
+  {
+    // Binder::BindModifiers pushes the default collation over every distinct target, so a VARCHAR
+    // key under a non-binary default_collation arrives as a call rather than as a bare reference:
+    // the only route ordinary SQL has into the not-a-bare-reference arm. The integration suite's
+    // collation case runs the same shape but can only watch the fallback counter, which both
+    // uncovered-output arms move, so this is where that arm's message is pinned.
+    //
+    // default_collation is GLOBAL_DEFAULT-scoped, but Catch2 rebuilds the fixture -- and with it
+    // the DuckDB instance -- for every leaf section, so the setting dies with this section.
+    auto collate = con->Query("SET default_collation = 'nocase'");
+    REQUIRE(collate);
+    REQUIRE_FALSE(collate->HasError());
+
+    require_rejected("SELECT DISTINCT pname FROM parts",
+                     "no distinct target is a plain reference to output column 0");
+  }
+
   SECTION("a nested distinct key is rejected before the child is planned")
   {
     auto create = con->Query("CREATE TABLE nested_keys (id INTEGER, s STRUCT(x INTEGER))");
@@ -695,8 +713,9 @@ TEST_CASE_METHOD(plan_tree_shape_fixture,
     // logical operator and leaves the parents that already resolved against HUGEINT alone. The
     // projection above the aggregate is an identity, so create_plan(LogicalProjection&) omits it
     // and the DISTINCT node's [INTEGER, HUGEINT] meets a child declaring [INTEGER, BIGINT].
-    require_rejected("SELECT DISTINCT val, sum(id) FROM big_left GROUP BY val",
-                     "the planned child produces");
+    // Match the per-column half of the message: both guard arms open with "the planned child
+    // produces", and only the element-type arm names a column.
+    require_rejected("SELECT DISTINCT val, sum(id) FROM big_left GROUP BY val", "for column 1");
   }
 }
 
