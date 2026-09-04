@@ -749,6 +749,7 @@ set(TEST_SOURCES
     test/cpp/operator/test_physical_grouped_aggregate_merge_mgpu.cpp
     test/cpp/operator/test_physical_hash_join_mgpu.cpp
     test/cpp/operator/test_physical_order_mgpu.cpp
+    test/cpp/operator/test_physical_union_mgpu.cpp
     test/cpp/operator/test_mgpu_stress.cpp
     test/cpp/operator/test_partition_memspace_mgpu.cpp
     test/cpp/memory/test_multiple_blocks_allocation_accessor.cpp
