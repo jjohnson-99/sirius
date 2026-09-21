@@ -24,6 +24,8 @@
 
 #include <nvtx3/nvtx3.hpp>
 
+#include <ranges>
+
 namespace sirius {
 namespace op {
 
@@ -65,7 +67,9 @@ void sirius_physical_union::build_pipelines(pipeline::sirius_pipeline& current,
   // `children` and read past the end silently. The other two preconditions already fail loudly
   // elsewhere: arity in the plan builder (`sirius_plan_set_operation.cpp`), and a non-sink
   // pipeline sink in `sirius_pipeline::reset_sink`.
-  for (auto& child_slot : children) {
+  // The converter schedules child metas last-created-first, so the last arm created here becomes
+  // pipeline #0: the seeded scan and the top execution priority. Reverse, so that is arm 0.
+  for (auto& child_slot : std::views::reverse(children)) {
     auto& child = *child_slot;
     if (child.children.empty()) {
       throw internal_exception(
@@ -147,8 +151,8 @@ std::optional<task_creation_hint> sirius_physical_union::get_next_task_hint()
     const bool has_data    = p->repo && p->repo->total_size() > 0;
     const bool is_finished = p->src_pipeline && p->src_pipeline->is_pipeline_finished();
     if (has_data) {
-      // A queued batch can come from scans.front() or a one-task lookahead request. Promote that
-      // activation to a normal draining request before relying on the nomination latch.
+      // A batch on an un-nominated arm came from scans.front() or, under lookahead, a one-task
+      // request; only the latter needs promoting to a full drain. Latch either way.
       sirius_physical_operator* producer_to_schedule = nullptr;
       creator::task_creator* creator_to_schedule     = nullptr;
       if (!_active_arm_nominated && !is_finished && p->src_pipeline) {
@@ -156,8 +160,10 @@ std::optional<task_creation_hint> sirius_physical_union::get_next_task_hint()
         auto* creator  = p->src_pipeline->get_task_creator();
         if (!producers.empty() && creator) {
           _active_arm_nominated = true;
-          producer_to_schedule  = &producers.front().get();
-          creator_to_schedule   = creator;
+          if (creator->is_lookahead_enabled()) {
+            producer_to_schedule = &producers.front().get();
+            creator_to_schedule  = creator;
+          }
         }
       }
 
