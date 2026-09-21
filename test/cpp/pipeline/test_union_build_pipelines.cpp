@@ -64,11 +64,12 @@ TEST_CASE("physical_union - arm pipelines are scheduled in arm order, arm 0 firs
   REQUIRE(r);
   REQUIRE_FALSE(r->HasError());
 
-  // Three arms of different widths so a reversed order cannot pass by symmetry.
+  // Three arms of different widths so a reversed order cannot pass by symmetry. Wrapped in an
+  // aggregate: this harness adds no RESULT_COLLECTOR, and a root UNION gets no pipeline of its own.
   const std::string query =
-    "SELECT n_nationkey AS k FROM nation "
+    "SELECT count(*) FROM (SELECT n_nationkey AS k FROM nation "
     "UNION ALL SELECT r_regionkey FROM region "
-    "UNION ALL SELECT s_suppkey FROM supplier";
+    "UNION ALL SELECT s_suppkey FROM supplier) t";
 
   sirius::test::with_conversion_result(
     con, query, [&](sirius::pipeline::pipeline_conversion_result& result) {

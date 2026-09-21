@@ -94,8 +94,8 @@ class sirius_physical_union : public sirius_physical_operator {
   //! Guarded by `lock`.
   std::size_t _active_arm = 0;
 
-  //! Whether UNION has issued a normal, draining nomination for the active arm's producer.
-  //! Guarded by `lock`.
+  //! Whether the active arm's producer has been nominated, or was already running when its first
+  //! batch arrived. Guarded by `lock`.
   bool _active_arm_nominated = false;
 
   std::vector<port*> _arm_ports;

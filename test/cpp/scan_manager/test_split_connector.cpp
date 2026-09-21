@@ -23,6 +23,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <future>
 #include <memory>
 #include <stop_token>
@@ -54,6 +55,17 @@ struct gated_provider final : databatch_provider {
     return {};
   }
 };
+
+bool wait_for(const std::function<bool()>& done,
+              std::chrono::seconds timeout = std::chrono::seconds{5})
+{
+  auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (!done()) {
+    if (std::chrono::steady_clock::now() > deadline) { return false; }
+    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+  }
+  return true;
+}
 
 }  // namespace
 
@@ -107,10 +119,11 @@ TEST_CASE("split_connector::get_next_split wakes on a push, parks again, then en
     pops.store(2);
   });
 
+  REQUIRE(wait_for([&] { return pops.load() == 1; }));  // got the pushed split
   std::this_thread::sleep_for(std::chrono::milliseconds{50});
-  REQUIRE(pops.load() == 1);              // got the pushed split, parked again
-  REQUIRE_FALSE(connector.is_closed());   // open and empty: is_closed() is closed AND drained
-  provider.release.set_value();           // provider ends the stream; the drain closes
+  REQUIRE(pops.load() == 1);             // parked again
+  REQUIRE_FALSE(connector.is_closed());  // open and empty: is_closed() is closed AND drained
+  provider.release.set_value();          // provider ends the stream; the drain closes
   producer.join();
   consumer.join();
   REQUIRE(first_ok.load());
