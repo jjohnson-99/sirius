@@ -39,6 +39,7 @@
 #include <format>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <string>
 #include <utility>
 namespace sirius {
@@ -294,9 +295,10 @@ void gpu_pipeline_executor::manager_loop()
       }
       break;
     }
-    auto output_consumers = gpu_task->get_output_consumers();
-    auto* pipeline        = gpu_task->get_pipeline();
-    auto exc_stream       = _stream_pool.acquire_stream(
+    auto output_consumers  = gpu_task->get_output_consumers();
+    auto* pipeline         = gpu_task->get_pipeline();
+    auto const source_slot = static_cast<std::size_t>(index_keys_for(*gpu_task).operator_type);
+    auto exc_stream        = _stream_pool.acquire_stream(
       cucascade::memory::exclusive_stream_pool::stream_acquire_policy::GROW);
     // Resolved once here: every report below belongs to THIS task's query, so a failure or
     // completion can never land on another in-flight query's promise. The shared_ptr also keeps
@@ -310,10 +312,21 @@ void gpu_pipeline_executor::manager_loop()
        exc_stream = std::move(exc_stream),
        consumers  = std::move(output_consumers),
        completion = std::move(completion),
-       pipeline]() mutable {
+       pipeline,
+       source_slot]() mutable {
         try {
           task->execute(::cuda::stream_ref{exc_stream.get()});
-          _tasks_executed.fetch_add(1, std::memory_order_relaxed);
+          _tasks_by_source[source_slot].fetch_add(1, std::memory_order_relaxed);
+          auto* gpu_task = cast_to_gpu_pipeline_task(task.get());
+          if (!gpu_task) {
+            SIRIUS_LOG_ERROR("GPU Pipeline Executor: Failed to cast completed task");
+            if (completion) {
+              completion->report_error("GPU Pipeline Executor: Failed to cast completed task");
+            }
+            return;
+          }
+          _cross_gpu_inputs_by_source[source_slot].fetch_add(gpu_task->get_cross_gpu_input_clones(),
+                                                             std::memory_order_relaxed);
         } catch (task_reschedule_exception& ex) {
           // Only THIS query's error state suppresses the reschedule. Previously one query's
           // failure silently stopped every other query's tasks from rescheduling.
@@ -326,6 +339,9 @@ void gpu_pipeline_executor::manager_loop()
             }
             return;
           }
+          // An attempt's clones count once, whether it completes or reschedules.
+          _cross_gpu_inputs_by_source[source_slot].fetch_add(gpu_task->get_cross_gpu_input_clones(),
+                                                             std::memory_order_relaxed);
 
           // Sync the stream to ensure all memory is released before the reschedule.
           exc_stream->synchronize();
@@ -500,7 +516,14 @@ bool gpu_pipeline_executor::is_task_queue_empty() const noexcept { return _task_
 
 executor_metrics gpu_pipeline_executor::get_metrics() const noexcept
 {
-  return {_tasks_executed.load(std::memory_order_relaxed)};
+  auto const load = [](auto const& slot) { return slot.load(std::memory_order_relaxed); };
+  executor_metrics metrics;
+  std::ranges::transform(_tasks_by_source, metrics.tasks_by_source.begin(), load);
+  std::ranges::transform(
+    _cross_gpu_inputs_by_source, metrics.cross_gpu_inputs_by_source.begin(), load);
+  metrics.tasks_executed =
+    std::accumulate(metrics.tasks_by_source.begin(), metrics.tasks_by_source.end(), std::size_t{0});
+  return metrics;
 }
 
 }  // namespace pipeline

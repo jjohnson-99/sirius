@@ -229,6 +229,15 @@ class operator_data {
    */
   [[nodiscard]] std::optional<int> get_preferred_device_id() const { return _preferred_device_id; }
 
+  /**
+   * @brief Number of batches the last prepare_for_processing call cloned from another GPU into the
+   * requested memory space.
+   *
+   * The count survives a prepare_for_processing call that throws. The default returns 0, for data
+   * that prepare_for_processing never clones.
+   */
+  [[nodiscard]] virtual std::size_t get_cross_gpu_clones() const noexcept { return 0; }
+
  private:
   /// Producer-assigned device preference; nullopt until set_preferred_device_id.
   std::optional<int> _preferred_device_id;
@@ -294,6 +303,11 @@ class pipelineable_operator_data : public operator_data {
   void prepare_for_processing(const ::cucascade::memory::memory_space* requested_memory_space,
                               ::cuda::stream_ref stream) override;
 
+  [[nodiscard]] std::size_t get_cross_gpu_clones() const noexcept override
+  {
+    return _cross_gpu_clones;
+  }
+
   [[nodiscard]] std::size_t get_estimated_size_in_bytes() const override
   {
     std::size_t total = 0;
@@ -325,6 +339,8 @@ class pipelineable_operator_data : public operator_data {
  private:
   std::vector<std::shared_ptr<::cucascade::data_batch>> _data_batches;
   std::optional<std::vector<::cucascade::read_only_data_batch>> _read_only_data_batches;
+  /// Backs get_cross_gpu_clones().
+  std::size_t _cross_gpu_clones = 0;
 };
 
 /**

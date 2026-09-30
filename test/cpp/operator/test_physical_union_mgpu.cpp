@@ -21,7 +21,7 @@
 // batch unpartitioned: the `pipelineable_operator_data` it hands on carries no
 // `partition_idx`, so the `partition_idx % num_gpus` pin every other MGPU
 // operator relies on never fires. Placement instead falls to the locality
-// block in task_creator.cpp:450-475, which reads the memory space of the
+// block in task_creator.cpp, which reads the memory space of the
 // inbound batch and picks the GPU already holding the most bytes.
 //
 // That makes `hash_partition_bytes` — the lever test_physical_order_mgpu.cpp
@@ -40,22 +40,20 @@
 //   1. Unequal arms drain across many batches — SINGLE GPU. The wide arm
 //      produces many scan batches, the narrow one a single batch. Correctness
 //      against a CPU oracle exercises the handoff after a multi-batch arm.
+//      It also pins one UNION task per arm batch.
 //   2. Three arms of descending width — SINGLE GPU. Advances the active arm
 //      twice, which the two-arm fixtures cannot.
-//   3. Balanced arms distribute across two GPUs — needs 2 GPUs.
-//   4. Unequal arms do not strand work on one GPU — needs 2 GPUs. The
-//      stranding failure the hint exists to prevent.
+//   3. Balanced arms run UNION tasks on both GPUs — needs 2 GPUs. Fails if
+//      every UNION task lands on one GPU while the scans spread.
+//   4. Unequal arms run the wide arm's UNION tasks on both GPUs — needs 2
+//      GPUs. Fails if the wide arm is stranded on one GPU.
 //
 // TEST_CASEs 1 and 2 carry [single-gpu] and no [mgpu] tag, so they run on a
 // single-GPU host; 3 and 4 carry [mgpu] and gate on require_two_gpus().
 //
-// NOT asserted here: zero cross-device migration — that a UNION task ran on
-// the GPU that produced its input batch. `tasks_executed` per executor proves
-// distribution, not locality, and the suite has no mechanism for the stronger
-// property. Demonstrating it needs either an nsys run or a negative control
-// that forces `partition_idx == 0` onto the sink, and the latter would mean a
-// behaviour hook in production code. See the union-all note set's
-// gpu-handoff.md §2.
+// Cases 3 and 4 also assert zero cross-GPU migration: no UNION input batch is
+// cloned from another GPU when its task prepares. A spill to host reloaded onto
+// another GPU is not a clone and is not seen.
 
 #include "mgpu_test_utils.hpp"
 
@@ -74,6 +72,8 @@
 
 namespace fs = std::filesystem;
 using namespace sirius::test::mgpu;
+using sirius::op::SiriusPhysicalOperatorType;
+using sirius::pipeline::executor_metrics;
 
 namespace {
 
@@ -137,21 +137,26 @@ std::string union_of(std::vector<fs::path> const& dirs)
   return sql;
 }
 
-// Run `query` under a generated env and return tasks_executed per device.
-std::map<int, size_t> run_and_collect(fs::path const& yaml, std::string const& query)
+std::map<int, executor_metrics> collect_metrics(sirius::pipeline::task_scheduler const& scheduler)
 {
-  std::map<int, size_t> tasks_per_gpu;
+  std::map<int, executor_metrics> metrics_per_gpu;
+  scheduler.visit_executors(
+    [&](int device_id, sirius::pipeline::gpu_pipeline_executor const& exec) {
+      metrics_per_gpu[device_id] = exec.get_metrics();
+    });
+  return metrics_per_gpu;
+}
+
+// Run `query` under a generated env and return each device's executor metrics.
+std::map<int, executor_metrics> run_and_collect(fs::path const& yaml, std::string const& query)
+{
   scoped_mgpu_env env(yaml);
   auto con = std::make_unique<duckdb::Connection>(env.make_connection());
   require_gpu_matches_cpu(*con, query, /*force_cpu_reference=*/true);
   auto& scheduler = env.get_task_scheduler(*con);
   con.reset();  // flush sinks before reading metrics
 
-  scheduler.visit_executors(
-    [&](int device_id, sirius::pipeline::gpu_pipeline_executor const& exec) {
-      tasks_per_gpu[device_id] = exec.get_metrics().tasks_executed;
-    });
-  return tasks_per_gpu;
+  return collect_metrics(scheduler);
 }
 
 }  // namespace
@@ -177,6 +182,12 @@ TEST_CASE("physical_union - unequal arms drain across many batches",
     scoped_mgpu_env env(yaml);
     auto con = env.make_connection();
     require_gpu_matches_cpu(con, query, /*force_cpu_reference=*/true);
+
+    // Read before the count(*) query below, which runs on the GPU and adds its own tasks.
+    auto const metrics = collect_metrics(env.get_task_scheduler(con)).at(0);
+    // One UNION task per arm batch: 8 wide + 1 narrow.
+    REQUIRE(metrics.tasks_from(SiriusPhysicalOperatorType::UNION) == 9);
+    REQUIRE(metrics.tasks_from(SiriusPhysicalOperatorType::GPU_SCAN) >= 1);
 
     auto rows = con.Query("SELECT count(*) FROM (" + query + ") t;");
     REQUIRE(rows);
@@ -221,7 +232,7 @@ TEST_CASE("physical_union - three arms of descending width",
   fs::remove_all(tmp, ec);
 }
 
-TEST_CASE("physical_union - balanced arms distribute across two GPUs",
+TEST_CASE("physical_union - balanced arms run UNION tasks on both GPUs",
           "[mgpu][operator-mgpu][union_all][gpu_execution]")
 {
   if (!require_two_gpus()) return;
@@ -236,19 +247,29 @@ TEST_CASE("physical_union - balanced arms distribute across two GPUs",
   generate_wide_arm(left);
   generate_wide_arm(right);
 
-  auto tasks_per_gpu = run_and_collect(yaml, union_of({left, right}));
-
-  INFO("gpu0 tasks=" << tasks_per_gpu[0] << " gpu1 tasks=" << tasks_per_gpu[1]);
-  REQUIRE(tasks_per_gpu.count(0));
-  REQUIRE(tasks_per_gpu.count(1));
-  REQUIRE(tasks_per_gpu.at(0) >= 1);
-  REQUIRE(tasks_per_gpu.at(1) >= 1);
+  auto const metrics = run_and_collect(yaml, union_of({left, right}));
+  REQUIRE(metrics.count(0));
+  REQUIRE(metrics.count(1));
+  auto const& gpu0   = metrics.at(0);
+  auto const& gpu1   = metrics.at(1);
+  auto const union0  = gpu0.tasks_from(SiriusPhysicalOperatorType::UNION);
+  auto const union1  = gpu1.tasks_from(SiriusPhysicalOperatorType::UNION);
+  auto const clones0 = gpu0.cross_gpu_inputs_from(SiriusPhysicalOperatorType::UNION);
+  auto const clones1 = gpu1.cross_gpu_inputs_from(SiriusPhysicalOperatorType::UNION);
+  INFO("union tasks gpu0=" << union0 << " gpu1=" << union1 << "; union clones gpu0=" << clones0
+                           << " gpu1=" << clones1 << "; all tasks gpu0=" << gpu0.tasks_executed
+                           << " gpu1=" << gpu1.tasks_executed);
+  REQUIRE(union0 >= 1);
+  REQUIRE(union1 >= 1);
+  // A UNION task runs where its one batch lives, so none of its inputs is cloned across GPUs.
+  REQUIRE(clones0 == 0);
+  REQUIRE(clones1 == 0);
 
   std::error_code ec;
   fs::remove_all(tmp, ec);
 }
 
-TEST_CASE("physical_union - unequal arms do not strand work on one GPU",
+TEST_CASE("physical_union - unequal arms run the wide arm's UNION tasks on both GPUs",
           "[mgpu][operator-mgpu][union_all][gpu_execution]")
 {
   if (!require_two_gpus()) return;
@@ -265,13 +286,23 @@ TEST_CASE("physical_union - unequal arms do not strand work on one GPU",
   generate_wide_arm(wide);
   generate_narrow_arm(narrow);
 
-  auto tasks_per_gpu = run_and_collect(yaml, union_of({wide, narrow}));
-
-  INFO("gpu0 tasks=" << tasks_per_gpu[0] << " gpu1 tasks=" << tasks_per_gpu[1]);
-  REQUIRE(tasks_per_gpu.count(0));
-  REQUIRE(tasks_per_gpu.count(1));
-  REQUIRE(tasks_per_gpu.at(0) >= 1);
-  REQUIRE(tasks_per_gpu.at(1) >= 1);
+  auto const metrics = run_and_collect(yaml, union_of({wide, narrow}));
+  REQUIRE(metrics.count(0));
+  REQUIRE(metrics.count(1));
+  auto const& gpu0   = metrics.at(0);
+  auto const& gpu1   = metrics.at(1);
+  auto const union0  = gpu0.tasks_from(SiriusPhysicalOperatorType::UNION);
+  auto const union1  = gpu1.tasks_from(SiriusPhysicalOperatorType::UNION);
+  auto const clones0 = gpu0.cross_gpu_inputs_from(SiriusPhysicalOperatorType::UNION);
+  auto const clones1 = gpu1.cross_gpu_inputs_from(SiriusPhysicalOperatorType::UNION);
+  INFO("union tasks gpu0=" << union0 << " gpu1=" << union1 << "; union clones gpu0=" << clones0
+                           << " gpu1=" << clones1 << "; all tasks gpu0=" << gpu0.tasks_executed
+                           << " gpu1=" << gpu1.tasks_executed);
+  // The narrow arm is one batch, so one UNION task; 2 per device needs the wide arm on both.
+  REQUIRE(union0 >= 2);
+  REQUIRE(union1 >= 2);
+  REQUIRE(clones0 == 0);
+  REQUIRE(clones1 == 0);
 
   std::error_code ec;
   fs::remove_all(tmp, ec);

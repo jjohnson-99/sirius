@@ -543,6 +543,7 @@ TEST_CASE("prepare_for_processing rebinds idle batches to the prepared clones",
   sirius::op::pipelineable_operator_data op_data(
     std::vector<std::shared_ptr<cucascade::data_batch>>{batch});
   op_data.prepare_for_processing(f.gpu1, stream);
+  REQUIRE(op_data.get_cross_gpu_clones() == 1);
 
   // get_data_batches() must return the clone underlying the read-only accessor, not the
   // stale original — downstream forwarding (dynamic_filter, sink) relies on this.
@@ -565,6 +566,10 @@ TEST_CASE("prepare_for_processing rebinds idle batches to the prepared clones",
     auto ro = clone_sp->to_read_only();
     REQUIRE(ro.get_memory_space()->get_id() == f.gpu1->get_id());
   }
+
+  // The clone is already on gpu1, so a second prepare clones nothing and the count restarts.
+  op_data.prepare_for_processing(f.gpu1, stream);
+  REQUIRE(op_data.get_cross_gpu_clones() == 0);
 }
 
 TEST_CASE("bytes_to_materialize_input counts cross-GPU inputs for the target space",

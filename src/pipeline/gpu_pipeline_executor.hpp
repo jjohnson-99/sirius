@@ -18,6 +18,7 @@
 
 #include "exec/channel.hpp"
 #include "exec/config.hpp"
+#include "op/sirius_physical_operator_type.hpp"
 #include "parallel/task_executor.hpp"
 #include "pipeline/completion_handler.hpp"
 #include "pipeline/gpu_pipeline_task.hpp"
@@ -26,9 +27,12 @@
 #include <cucascade/memory/memory_space.hpp>
 #include <cucascade/memory/stream_pool.hpp>
 
+#include <array>
 #include <atomic>
+#include <cstddef>
 #include <memory>
 #include <thread>
+#include <type_traits>
 
 namespace sirius::op {
 class sirius_physical_operator;
@@ -50,8 +54,41 @@ class task_creator;
 
 namespace pipeline {
 
+//! One slot per value SiriusPhysicalOperatorType can hold, so every enumerator indexes in bounds.
+inline constexpr std::size_t operator_type_slots =
+  std::size_t{1} << (8 * sizeof(std::underlying_type_t<op::SiriusPhysicalOperatorType>));
+static_assert(
+  std::is_unsigned_v<std::underlying_type_t<op::SiriusPhysicalOperatorType>> &&
+    operator_type_slots <= 256,
+  "the operator-type enum must be unsigned and at most 8 bits wide to index the metric");
+
+/**
+ * @brief Snapshot of one gpu_pipeline_executor's task and cross-GPU clone counts, broken down by
+ * the source operator type of each task's pipeline.
+ *
+ * A task whose pipeline or source is missing is counted under SiriusPhysicalOperatorType::INVALID.
+ */
 struct executor_metrics {
-  size_t tasks_executed{0};
+  //! Tasks whose execute() returned on this executor; the sum of tasks_by_source.
+  std::size_t tasks_executed{0};
+  //! The same tasks, by source operator type.
+  std::array<std::size_t, operator_type_slots> tasks_by_source{};
+  //! Input batches cloned from another GPU while tasks prepared, summed over attempts that
+  //! completed or were rescheduled.
+  std::array<std::size_t, operator_type_slots> cross_gpu_inputs_by_source{};
+
+  //! Tasks from pipelines whose source is `type`.
+  [[nodiscard]] constexpr std::size_t tasks_from(op::SiriusPhysicalOperatorType type) const noexcept
+  {
+    return tasks_by_source[static_cast<std::size_t>(type)];
+  }
+
+  //! Cross-GPU input clones in pipelines whose source is `type`.
+  [[nodiscard]] constexpr std::size_t cross_gpu_inputs_from(
+    op::SiriusPhysicalOperatorType type) const noexcept
+  {
+    return cross_gpu_inputs_by_source[static_cast<std::size_t>(type)];
+  }
 };
 
 /**
@@ -141,7 +178,10 @@ class gpu_pipeline_executor : public sirius::parallel::itask_executor {
   cucascade::memory::memory_space* _memory_space;
   sirius::parallel::downgrade_executor* _downgrade_executor{nullptr};
   sirius::creator::task_creator* _task_creator{nullptr};
-  std::atomic<size_t> _tasks_executed{0};
+  //! Backs executor_metrics::tasks_by_source.
+  std::array<std::atomic<std::size_t>, operator_type_slots> _tasks_by_source{};
+  //! Backs executor_metrics::cross_gpu_inputs_by_source.
+  std::array<std::atomic<std::size_t>, operator_type_slots> _cross_gpu_inputs_by_source{};
 };
 
 }  // namespace pipeline

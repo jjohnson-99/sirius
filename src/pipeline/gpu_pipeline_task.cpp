@@ -667,11 +667,13 @@ void gpu_pipeline_task::execute(::cuda::stream_ref stream)
   });
   try {
     local_state._input_data->prepare_for_processing(requested_memory_space, stream);
+    _cross_gpu_input_clones = local_state._input_data->get_cross_gpu_clones();
     // synchronizing here to ensure the timing collected by Quent and logging for preparing the task
     // is accurate.
     stream.sync();
   } catch (const rmm::out_of_memory& oom) {
-    auto peak_bytes = allocator->get_peak_allocated_bytes(stream);
+    _cross_gpu_input_clones = local_state._input_data->get_cross_gpu_clones();
+    auto peak_bytes         = allocator->get_peak_allocated_bytes(stream);
     std::optional<std::size_t> retry_requested_bytes;
     if (auto const* cc_oom =
           dynamic_cast<const cucascade::memory::cucascade_out_of_memory*>(&oom)) {

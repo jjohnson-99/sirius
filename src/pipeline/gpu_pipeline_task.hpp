@@ -314,6 +314,17 @@ class gpu_pipeline_task : public sirius_pipeline_itask {
   virtual std::unique_ptr<gpu_pipeline_task> create_rescheduled_task(
     uint64_t task_id, std::unique_ptr<sirius_pipeline_task_local_state> local_state);
 
+  /**
+   * @brief Input batches this attempt cloned from another GPU while preparing its input.
+   *
+   * Set once preparation returns or runs out of memory, so gpu_pipeline_executor can read it after
+   * execute() returns or throws a task_reschedule_exception. Zero before preparation.
+   */
+  [[nodiscard]] std::size_t get_cross_gpu_input_clones() const noexcept
+  {
+    return _cross_gpu_input_clones;
+  }
+
  private:
   std::vector<cucascade::shared_data_repository*> _data_repos;
   cucascade::memory::reservation_aware_resource_adaptor* _allocator = nullptr;
@@ -329,6 +340,8 @@ class gpu_pipeline_task : public sirius_pipeline_itask {
   //! telemetry states as a MemoryTier usage (nil id = none).
   uuid::UUID _reservation_tier_resource_id{};
   uint64_t _reservation_bytes = 0;
+  //! Backs get_cross_gpu_input_clones().
+  std::size_t _cross_gpu_input_clones = 0;
 };
 
 /**

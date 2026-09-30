@@ -245,4 +245,10 @@ TEST_CASE("GPU pipeline executor schedules GPU tasks directly (push-model)",
       REQUIRE(consumed_bytes >= kReservationBytes);
     }
   }
+
+  // These tasks have no pipeline, so every one counts under INVALID.
+  auto const metrics = executor.get_metrics();
+  REQUIRE(metrics.tasks_executed == static_cast<std::size_t>(num_tasks));
+  REQUIRE(metrics.tasks_from(sirius::op::SiriusPhysicalOperatorType::INVALID) ==
+          static_cast<std::size_t>(num_tasks));
 }

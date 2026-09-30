@@ -65,6 +65,7 @@ void pipelineable_operator_data::prepare_for_processing(
   const ::cucascade::memory::memory_space* requested_memory_space, ::cuda::stream_ref stream)
 {
   remove_read_only_lock();
+  _cross_gpu_clones = 0;
 
   std::vector<cucascade::read_only_data_batch> ro_batches;
   ro_batches.reserve(_data_batches.size());
@@ -83,7 +84,7 @@ void pipelineable_operator_data::prepare_for_processing(
                      [&ro_batches](pipeline::lock_to_existing_batch& result) {
                        ro_batches.push_back(std::move(result.ro_lock));
                      },
-                     [&batch, &ro_batches](pipeline::lock_to_new_batch& result) {
+                     [this, &batch, &ro_batches](pipeline::lock_to_new_batch& result) {
                        // result has returned a read_only accessor to a clone (for the case of
                        // cross-GPU input/target_mem_space), so the ro_lock accessor here references
                        // a different batch than `batch` from `_data_batches`. Update the vector so
@@ -92,6 +93,7 @@ void pipelineable_operator_data::prepare_for_processing(
                        // _read_only_data_batches[i].
                        batch = std::move(result.new_batch);
                        ro_batches.push_back(std::move(result.ro_lock));
+                       ++_cross_gpu_clones;
                      },
                    },
                    result);
