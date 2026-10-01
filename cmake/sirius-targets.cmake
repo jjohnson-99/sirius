@@ -1,4 +1,3 @@
-add_library(sirius_objects OBJECT ${EXTENSION_SOURCES} ${CUDA_SOURCES})
 set_target_properties(sirius_objects PROPERTIES POSITION_INDEPENDENT_CODE ON
                                                 CXX_VISIBILITY_PRESET hidden)
 add_library(sirius_core STATIC $<TARGET_OBJECTS:sirius_objects>)
@@ -22,6 +21,30 @@ set_property(
 # bypass the cuCascade reservation system. Force bfd to keep them exported.
 # Harmless for the single-DSO static vcpkg build.
 set_target_properties(sirius_loadable_extension PROPERTIES LINKER_TYPE BFD)
+
+if(VCPKG_BUILD AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(_sirius_cuda_link_script
+      "${CMAKE_CURRENT_LIST_DIR}/sirius-cuda-fatbin.ld")
+  set(_sirius_cuda_link_interface
+      "$<BUILD_INTERFACE:${_sirius_cuda_link_script}>$<INSTALL_INTERFACE:$<INSTALL_PREFIX>/${CMAKE_INSTALL_LIBDIR}/cmake/sirius/sirius-cuda-fatbin.ld>"
+  )
+  foreach(_target sirius_core sirius_extension)
+    target_link_options(${_target} INTERFACE
+                        "$<HOST_LINK:LINKER:-T,${_sirius_cuda_link_interface}>")
+    set_property(
+      TARGET ${_target}
+      APPEND
+      PROPERTY INTERFACE_LINK_DEPENDS "${_sirius_cuda_link_interface}")
+  endforeach()
+  foreach(_target sirius_shared sirius_loadable_extension)
+    target_link_options(${_target} PRIVATE
+                        "$<HOST_LINK:LINKER:-T,${_sirius_cuda_link_script}>")
+    set_property(
+      TARGET ${_target}
+      APPEND
+      PROPERTY LINK_DEPENDS "${_sirius_cuda_link_script}")
+  endforeach()
+endif()
 
 # Shared configuration for both extension targets
 set(SIRIUS_CLANG_CXX_WARNING_OPTIONS -Wunreachable-code -Wimplicit-fallthrough
@@ -75,23 +98,15 @@ foreach(_target sirius_objects sirius_core sirius_extension
     PRIVATE
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/compression/simpatico_codegen/src>
-      $<$<BOOL:${SIRIUS_LEGACY_INCLUDE_DIR}>:$<BUILD_INTERFACE:${SIRIUS_LEGACY_INCLUDE_DIR}>>
   )
 
   # Substrait->DuckDB reader headers (from_substrait.hpp) and its bundled
   # protobuf.
   target_include_directories(
     ${_target}
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/duckdb/extension/core_functions/include
-            ${CMAKE_CURRENT_SOURCE_DIR}/duckdb/extension/parquet/include
-            ${SIRIUS_SUBSTRAIT_DIR}/src/include
+    PRIVATE ${SIRIUS_SUBSTRAIT_DIR}/src/include
             ${SIRIUS_SUBSTRAIT_DIR}/third_party
             ${SIRIUS_SUBSTRAIT_DIR}/third_party/substrait)
-
-  if(SIRIUS_LEGACY_COMPILE_DEFINITIONS)
-    target_compile_definitions(${_target}
-                               PRIVATE ${SIRIUS_LEGACY_COMPILE_DEFINITIONS})
-  endif()
 
   # cuCascade::cucascade_cudf holds the cudf-coupled representations and
   # converters Sirius uses; it transitively links the cudf-free core
@@ -111,8 +126,7 @@ foreach(_target sirius_objects sirius_core sirius_extension
     yaml-cpp::yaml-cpp
     roaring::roaring
     telemetry_bridge
-    core_functions_extension
-    parquet_extension
+    $<BUILD_INTERFACE:sirius::duckdb_dependency>
     simpatico)
   if(BUILD_WITH_CTRACK)
     target_link_libraries(${_target} ${_link_scope} ctrack::ctrack)
@@ -133,9 +147,13 @@ foreach(_target sirius_objects sirius_core sirius_extension
     PkgConfig::LIBURING
     ${SIRIUS_CURL_TARGET}
     OpenSSL::Crypto
-    absl::any_invocable)
-  add_dependencies(${_target} duckdb_static)
+    absl::any_invocable
+    kvikio::kvikio)
 endforeach()
+
+# Additional libraries only needed by the static extension
+target_link_libraries(sirius_extension PkgConfig::NUMA PkgConfig::LIBURING
+                      ${SIRIUS_CURL_TARGET} OpenSSL::Crypto absl::any_invocable)
 
 # `sirius_core` is itself an archive, so its LINK_LIBRARY_OVERRIDE does not
 # perform a final link. Carry the concrete Rust archive as a transitive
@@ -158,7 +176,7 @@ foreach(_target sirius_core sirius_extension)
 endforeach()
 
 target_link_libraries(sirius_loadable_extension PkgConfig::LIBURING
-                      ${SIRIUS_CURL_TARGET} OpenSSL::Crypto)
+                      ${SIRIUS_CURL_TARGET} OpenSSL::Crypto absl::any_invocable)
 
 # NVTX's runtime injection lookup dlopens the path named by
 # NVTX_INJECTION64_PATH and resolves InitializeInjectionNvtx2 from it. Export
@@ -186,7 +204,7 @@ target_include_directories(
 target_compile_features(sirius_shared PUBLIC cxx_std_20)
 target_link_libraries(
   sirius_shared
-  PRIVATE duckdb_static
+  PRIVATE sirius::duckdb_dependency
           "$<LINK_LIBRARY:WHOLE_ARCHIVE,dummy_static_extension_loader>")
 set_target_properties(sirius_shared PROPERTIES LINKER_TYPE LLD)
 

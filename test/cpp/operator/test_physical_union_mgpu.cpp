@@ -233,7 +233,7 @@ TEST_CASE("physical_union - three arms of descending width",
 }
 
 TEST_CASE("physical_union - balanced arms run UNION tasks on both GPUs",
-          "[mgpu][operator-mgpu][union_all][gpu_execution]")
+          "[mgpu][operator-mgpu][union_all][gpu_execution][multi_gpu]")
 {
   if (!require_two_gpus()) return;
 
@@ -270,7 +270,7 @@ TEST_CASE("physical_union - balanced arms run UNION tasks on both GPUs",
 }
 
 TEST_CASE("physical_union - unequal arms run the wide arm's UNION tasks on both GPUs",
-          "[mgpu][operator-mgpu][union_all][gpu_execution]")
+          "[mgpu][operator-mgpu][union_all][gpu_execution][multi_gpu]")
 {
   if (!require_two_gpus()) return;
 
