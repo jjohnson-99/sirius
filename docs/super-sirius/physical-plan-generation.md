@@ -68,7 +68,11 @@ Before either is chosen, `materialize_expression_join_keys()` pushes a projectio
 
 **File:** `src/planner/sirius_plan_set_operation.cpp`
 
-`create_plan(LogicalSetOperation&)` sends `EXCEPT` and `INTERSECT` to `plan_except_intersect`. It lowers only the `ALL` forms, and it lowers them by counting rows rather than by joining, as Spark does. A distinct row seen `m` times in the left input and `n` times in the right is emitted `max(m - n, 0)` times for `EXCEPT ALL` and `min(m, n)` times for `INTERSECT ALL`:
+`create_plan(LogicalSetOperation&)` sends `EXCEPT` and `INTERSECT` to `plan_except_intersect`.
+
+The distinct forms lower as DuckDB lowers them: a hash join of the left input against the right, with one `IS NOT DISTINCT FROM` key per column, so `NULL` matches `NULL`. `INTERSECT` is a `SEMI` join and `EXCEPT` an `ANTI` join. The left input is always the probe side, and the output side. The binder puts a `DISTINCT` above the set operation, so the join itself does not deduplicate.
+
+The `ALL` forms lower by counting rows rather than by joining, as Spark does. A distinct row seen `m` times in the left input and `n` times in the right is emitted `max(m - n, 0)` times for `EXCEPT ALL` and `min(m, n)` times for `INTERSECT ALL`:
 
 1. Each input is projected to its columns followed by constant `TINYINT` tags. `EXCEPT ALL` uses one tag (`1` on the left, `-1` on the right); `INTERSECT ALL` uses two (`1, 0` on the left, `0, 1` on the right).
 2. A `UNION` merges the two tagged inputs.
@@ -78,11 +82,11 @@ Before either is chosen, `materialize_expression_join_keys()` pushes a projectio
 
 The builder throws `NotImplementedException`, so the query falls back to CPU, for:
 
-- the distinct forms of `EXCEPT` and `INTERSECT` (the dispatch switch in `create_plan()` refuses them as well);
 - nested-type columns;
 - keys DuckDB compares through a collation or normalization, such as a collated `VARCHAR` or an `INTERVAL`, because the GPU would compare raw values;
-- `FLOAT` and `DOUBLE` keys, because a group keeps only one of its `-0.0` and `+0.0` rows, where DuckDB returns each input's own rows;
-- inputs whose planned column types differ from each other or from the declared types. The one allowed difference is an aggregate result DuckDB types as `HUGEINT` and Sirius plans as `BIGINT`.
+- in the `ALL` forms, `FLOAT` and `DOUBLE` keys, because a group keeps only one of its `-0.0` and `+0.0` rows, where DuckDB returns each input's own rows;
+- inputs whose planned column types differ from each other or from the declared types. The `ALL` forms allow one difference, an aggregate result DuckDB types as `HUGEINT` and Sirius plans as `BIGINT`; the distinct forms allow none;
+- in the distinct forms, keys the GPU hash join does not support.
 
 ### Filter Pushdown
 

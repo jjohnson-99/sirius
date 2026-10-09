@@ -325,8 +325,9 @@ Conditional MARK joins produce the same three-valued mark as the hash join, via 
 
 `UNION ALL` only — bag concatenation, so the operator computes nothing and `execute` is the
 identity. N-ary: `a UNION ALL b UNION ALL c` binds to one `LogicalSetOperation`, so every path loops
-over `children`. Distinct `UNION`, `EXCEPT` and `INTERSECT` are rejected by the plan builder
-(`src/planner/sirius_plan_set_operation.cpp`), as is `allow_out_of_order = false`. The
+over `children`. Distinct `UNION` is rejected by the plan builder
+(`src/planner/sirius_plan_set_operation.cpp`), as is `allow_out_of_order = false`; distinct
+`EXCEPT` and `INTERSECT` lower to a hash join instead. The
 `EXCEPT ALL` / `INTERSECT ALL` lowering also uses `UNION` to merge its two tagged inputs.
 
 - **One port per arm.** `wrap_union` wraps each arm `child -> PASSTHROUGH_SINK`, feeding a distinct
