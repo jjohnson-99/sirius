@@ -393,10 +393,6 @@ sirius_physical_plan_generator::plan_except_intersect(duckdb::LogicalSetOperatio
   auto const set_op = filtering_set_operation_of(op.type);
   std::string const name =
     op.setop_all ? std::string{set_op.name} + " ALL" : std::string{set_op.name};
-  // Of the distinct forms, only INTERSECT lowers here so far.
-  if (!op.setop_all && op.type == duckdb::LogicalOperatorType::LOGICAL_EXCEPT) {
-    throw duckdb::NotImplementedException("EXCEPT (distinct) not supported on the GPU path");
-  }
 
   D_ASSERT(op.children.size() == 2);
   if (op.children.size() != 2) {
