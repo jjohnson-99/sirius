@@ -169,8 +169,7 @@ class sirius_physical_plan_generator {
   // duckdb::unique_ptr<sirius::op::sirius_physical_operator> create_plan(duckdb::LogicalExplain
   // &op);
   //! `UNION ALL`, or a set operation forked to `plan_except_intersect`; the builder rejects
-  //! distinct UNION. The dispatch switch refuses distinct EXCEPT / INTERSECT, so only their ALL
-  //! forms arrive from SQL.
+  //! distinct UNION.
   duckdb::unique_ptr<sirius::op::sirius_physical_operator> create_plan(
     duckdb::LogicalSetOperation& op);
   // duckdb::unique_ptr<sirius::op::sirius_physical_operator> create_plan(duckdb::LogicalUpdate

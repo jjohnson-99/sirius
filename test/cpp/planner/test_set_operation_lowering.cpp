@@ -409,16 +409,16 @@ TEST_CASE_METHOD(set_operation_lowering_fixture,
 }
 
 TEST_CASE_METHOD(set_operation_lowering_fixture,
-                 "set_operation - the dispatch switch refuses only the distinct forms",
+                 "set_operation - the dispatch switch sends both forms to the builder",
                  "[planner][set_operation][isolated_context]")
 {
   for (std::string const keyword : {"EXCEPT", "INTERSECT"}) {
-    REQUIRE_THROWS_WITH(
-      plan_set_operation(*con, "SELECT k FROM ia " + keyword + " SELECT k FROM ib", true),
-      ContainsSubstring("only the ALL forms"));
-    auto const plan =
+    auto const distinct_plan =
+      plan_set_operation(*con, "SELECT k FROM ia " + keyword + " SELECT k FROM ib", true);
+    CHECK(distinct_plan->type == SiriusPhysicalOperatorType::HASH_JOIN);
+    auto const all_plan =
       plan_set_operation(*con, "SELECT k FROM ia " + keyword + " ALL SELECT k FROM ib", true);
-    CHECK(plan->type == SiriusPhysicalOperatorType::REPLICATE);
+    CHECK(all_plan->type == SiriusPhysicalOperatorType::REPLICATE);
   }
 }
 
